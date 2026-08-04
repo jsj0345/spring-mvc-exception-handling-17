@@ -2,14 +2,18 @@ package hello.exception;
 
 import hello.exception.filter.LogFilter;
 import hello.exception.interceptor.LogInterceptor;
+import hello.exception.resolver.MyHandlerExceptionResolver;
 import jakarta.servlet.DispatcherType;
 import jakarta.servlet.Filter;
 import jakarta.servlet.FilterRegistration;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.web.servlet.HandlerExceptionResolver;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+import java.util.List;
 
 /*
 @Configuration은 내부에 @Component가 포함되어 있으므로 설정 클래스 자체를 스프링 빈으로 등록한다.
@@ -25,7 +29,6 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 @Configuration
 public class WebConfig implements WebMvcConfigurer {
 
-
   @Override
   public void addInterceptors(InterceptorRegistry registry) {
     // dispatcherType을 세팅 할 수 없다.
@@ -37,6 +40,10 @@ public class WebConfig implements WebMvcConfigurer {
     // 여기서 필터보다 더 편하다는 것을 알 수 있다.
   }
 
+  @Override
+  public void extendHandlerExceptionResolvers(List<HandlerExceptionResolver> resolvers) {
+    resolvers.add(new MyHandlerExceptionResolver());
+  }
 
   //@Bean
   public FilterRegistrationBean logFilter() {
