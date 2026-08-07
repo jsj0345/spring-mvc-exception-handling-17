@@ -8,8 +8,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.mvc.annotation.ResponseStatusExceptionResolver;
+import org.springframework.web.servlet.mvc.support.DefaultHandlerExceptionResolver;
 
 @Slf4j
 @RestController
@@ -49,6 +52,22 @@ public class ApiExceptionController {
     throw new ResponseStatusException(HttpStatus.NOT_FOUND, "error.bad", new IllegalArgumentException());
   }
 
+  @GetMapping("/api/default-handler-ex")
+  public String defaultException(@RequestParam("data") Integer data) {
+    return "ok";
+    //DefaultHandlerExceptionResolver 를 봐야함.
+    /*
+    if (ex instanceof TypeMismatchException theEx) {
+        return this.handleTypeMismatch(theEx, request, response, handler);
+    }
+    이 부분을 보자.
+    protected ModelAndView handleTypeMismatch(TypeMismatchException ex, HttpServletRequest request, HttpServletResponse response, @Nullable Object handler) throws IOException {
+      response.sendError(400);
+      return new ModelAndView();
+    }
+    sendError(400)이여서 500번대가아닌 400번으로 바뀜.
+    */
+  }
 
   @Data
   @AllArgsConstructor
