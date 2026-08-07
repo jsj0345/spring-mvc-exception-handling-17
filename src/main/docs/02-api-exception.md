@@ -504,6 +504,412 @@ ResponseStatusException 발생
 → 지정한 상태 코드와 메시지 적용
 ```
 
+`@ResponseStatus`나 `ResponseStatusException`에서 결국 `sendError()`를 거치기 때문에 Resolver 안에서 완전히 끝나는 흐름은 아님.
+
+다음 코드를 참고하자. 
+```java
+protected ModelAndView applyStatusAndReason(int statusCode, @Nullable String reason, HttpServletResponse response) throws IOException {
+    if (!StringUtils.hasLength(reason)) {
+      response.sendError(statusCode);
+    } else {
+      String resolvedReason = this.messageSource != null ? this.messageSource.getMessage(reason, (Object[])null, reason, LocaleContextHolder.getLocale()) : reason;
+      response.sendError(statusCode, resolvedReason);
+    }
+
+    return new ModelAndView();
+  }
+```
+
+## 22. 타입 변환 오류도 Resolver가 HTTP 응답에 맞게 정리한다
+
+컨트롤러 메서드의 파라미터 타입과 실제 요청 값이 맞지 않으면 컨트롤러 메서드가 실행되기 전에 변환 과정에서 예외가 발생할 수 있다.
+
+예를 들어 다음 요청을 생각해보자.
+
+```text
+/api/default-handler-ex?data=aaa
+```
+
+컨트롤러는 `data`를 `Integer`로 받도록 선언되어 있다.
+
+```java
+@GetMapping("/api/default-handler-ex")
+public String defaultException(@RequestParam("data") Integer data) {
+    return "ok";
+}
+```
+
+`aaa`는 `Integer`로 바꿀 수 없기 때문에 정상적으로 파라미터를 만들 수 없다.
+
+이런 종류의 예외까지 전부 500으로 내려버리면 서버 내부 로직이 고장 난 것처럼 보인다. 하지만 실제 원인은 클라이언트가 숫자가 필요한 자리에 문자를 보낸 것이다.
+
+Spring MVC는 이런 상황을 기본 Resolver 중 하나인 `DefaultHandlerExceptionResolver`에서 다룬다.
+
+```text
+요청 값 변환 실패
+→ 타입 관련 예외 발생
+→ DispatcherServlet이 Resolver들에게 처리 요청
+→ DefaultHandlerExceptionResolver가 처리
+→ 응답 상태를 400으로 변경
+```
+
+즉, 자바 예외의 종류를 보고 HTTP 관점에서 더 알맞은 상태 코드로 바꾸는 역할을 한다고 이해하면 된다.
+
+---
+
+## 23. DefaultHandlerExceptionResolver도 sendError()를 사용하는 경우가 있다
+
+타입 변환 실패를 처리하는 내부 로직을 보면 핵심은 다음 정도다.
+
+```java
+response.sendError(400);
+return new ModelAndView();
+```
+
+여기서 두 동작을 분리해서 봐야 한다.
+
+```text
+빈 ModelAndView 반환
+→ 발생했던 예외는 Resolver가 처리한 것으로 판단
+
+sendError(400)
+→ 응답에 오류 상태 기록
+→ WAS의 오류 처리 절차가 다시 동작할 수 있음
+```
+
+따라서 `DefaultHandlerExceptionResolver`가 예외를 처리하지 못해서 `/error`로 가는 것이 아니다.
+
+**예외 자체는 Resolver가 정리했지만, 처리 과정에서 `sendError(400)`을 호출했기 때문에 WAS의 오류 처리 흐름이 이어지는 것**이다.
+
+---
+
+## 24. 그래서 최종 응답에 BasicErrorController의 오류 정보가 보일 수 있다
+
+현재 프로젝트에서 다음과 같이 잘못된 값을 요청하면 400 응답이 내려온다.
+
+```text
+/api/default-handler-ex?data=qqq
+```
+
+응답은 대략 다음과 같은 형태가 된다.
+
+```json
+{
+  "timestamp": "...",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "...",
+  "path": "/api/default-handler-ex"
+}
+```
+
+이 결과를 보고 `DefaultHandlerExceptionResolver`가 JSON을 직접 만든다고 생각하면 안 된다.
+
+흐름은 다음과 같이 나눠서 보는 편이 정확하다.
+
+```text
+타입 변환 실패
+→ DefaultHandlerExceptionResolver
+→ sendError(400)
+→ 빈 ModelAndView 반환
+→ 원래 예외는 해결됨
+→ WAS 오류 처리
+→ /error
+→ BasicErrorController
+→ 오류 정보를 Body에 담아 응답
+```
+
+`timestamp`, `status`, `error`, `path` 같은 공통 오류 정보가 보이는 이유도 마지막에 Spring Boot의 기본 오류 처리 경로를 거쳤기 때문이다.
+
+---
+
+## 25. 상태 코드를 정리하는 것과 API 오류 응답을 설계하는 것은 별개다
+
+여기까지의 Resolver를 보면서 한 가지 구분할 필요가 있다.
+
+예외를 적절한 HTTP 상태 코드로 바꾸는 것과, 클라이언트가 실제로 사용할 오류 데이터를 만드는 것은 같은 일이 아니다.
+
+예를 들어 `DefaultHandlerExceptionResolver`는 타입 변환 실패를 400으로 정리해준다.
+
+```text
+문자열을 Integer로 변환 실패
+→ 예외 발생
+→ DefaultHandlerExceptionResolver
+→ 400 Bad Request
+```
+
+HTTP 관점에서는 이것만으로도 잘못된 요청이라는 의미가 전달된다.
+
+하지만 프론트나 다른 서버가 이 응답을 받아서 실제 처리를 해야 한다면 상태 코드만으로는 부족할 수 있다.
+
+```json
+{
+  "code": "INVALID_PARAMETER",
+  "message": "data는 숫자로 입력해야 합니다."
+}
+```
+
+이처럼 API에서는 상태 코드 외에도 클라이언트가 판단에 사용할 오류 코드나 메시지처럼 **우리 서비스가 정한 응답 구조**가 필요할 수 있다.
+
+Spring Boot의 기본 오류 응답을 그대로 사용할 수도 있지만, 모든 API가 항상 같은 오류 정보만 필요한 것은 아니다.
+
+또 앞에서 직접 만든 `HandlerExceptionResolver`처럼 원하는 JSON을 직접 작성할 수도 있다.
+다만 그렇게 하면 다음 작업까지 예외 처리 코드에서 직접 책임져야 했다.
+
+```text
+상태 코드 지정
+→ Content-Type 지정
+→ 객체를 JSON 문자열로 변환
+→ HttpServletResponse Body에 직접 기록
+```
+
+이 방식도 동작은 하지만 일반 컨트롤러에서는 객체 하나만 반환해도 메시지 컨버터가 응답을 만들어주던 것과 비교하면 작성해야 할 코드가 많다.
+
+그래서 다음 단계에서는 **예외 처리에서도 일반 컨트롤러처럼 객체를 반환하고, Spring MVC의 응답 처리 기능을 그대로 활용하는 방법**을 사용한다.
+
+---
+
+## 26. 예외 처리도 컨트롤러 메서드처럼 분리할 수 있다
+
+앞에서는 `HandlerExceptionResolver`를 직접 구현해서 예외를 처리했다.
+
+이 방식에서는 예외 종류를 직접 확인한 뒤, 필요한 경우 상태 코드와 `Content-Type`을 지정하고 객체를 JSON으로 변환한 다음 `HttpServletResponse`의 Body에 직접 기록하는 과정까지 코드로 작성해야 했다.
+
+반면 `@ExceptionHandler`를 사용하면 컨트롤러에서 발생한 특정 예외를 별도의 예외 처리 메서드로 연결할 수 있다.
+
+```java
+@ExceptionHandler(IllegalArgumentException.class)
+public ErrorResult illegalExHandler(IllegalArgumentException e) {
+    return new ErrorResult("BAD", e.getMessage());
+}
+```
+
+해당 컨트롤러에서 `IllegalArgumentException`이 발생하면 `ExceptionHandlerExceptionResolver`가 현재 예외를 처리할 수 있는 `@ExceptionHandler` 메서드를 찾고, 일치하는 메서드를 실행한다.
+
+```text
+Controller에서 IllegalArgumentException 발생
+→ DispatcherServlet
+→ ExceptionHandlerExceptionResolver
+→ 처리 가능한 @ExceptionHandler 메서드 탐색
+→ illegalExHandler() 실행
+```
+
+즉, 직접 `HandlerExceptionResolver`를 구현하는 방식처럼 예외 분기와 응답 처리 과정을 하나의 Resolver 안에서 수동으로 작성하는 대신, 예외별 처리 로직을 일반 컨트롤러 메서드처럼 분리해서 작성할 수 있다.
+
+단, `@ExceptionHandler` 자체가 반환 객체를 JSON으로 변환하는 것은 아니다. 반환값이 실제 HTTP Body에 어떻게 들어가는지는 `@RestController`, `@ResponseBody`, `ResponseEntity`와 같은 응답 처리 방식에 따라 결정되며, 이 부분은 다음에서 이어서 정리한다.
+
+---
+
+## 27. @ExceptionHandler 자체가 JSON을 만드는 것은 아니다
+
+`@ExceptionHandler`의 역할은 **어떤 예외를 어떤 메서드가 담당할지 연결하는 것**이다.
+
+반환 객체를 JSON으로 만드는 기능까지 `@ExceptionHandler`가 담당하는 것은 아니다.
+
+현재 `ApiExceptionV2Controller`는 `@RestController`이므로 반환값이 응답 Body로 처리된다.
+
+```java
+@RestController
+public class ApiExceptionV2Controller {
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ErrorResult illegalExHandler(IllegalArgumentException e) {
+        return new ErrorResult("BAD", e.getMessage());
+    }
+}
+```
+
+흐름은 다음과 같다.
+
+```text
+@ExceptionHandler
+→ 처리할 예외와 메서드를 연결
+
+@RestController / @ResponseBody
+→ 반환 객체를 HTTP Body로 처리
+
+HttpMessageConverter
+→ ErrorResult 객체를 JSON으로 변환
+```
+
+따라서 `@ExceptionHandler = JSON 변환`으로 외우면 안 된다.
+
+---
+
+## 28. 예외를 처리한 뒤에는 상태 코드도 따로 생각해야 한다
+
+예외 처리 메서드가 정상적으로 실행되어 `ErrorResult` 객체를 반환했다고 해서 HTTP 상태 코드까지 자동으로 400이나 500이 되는 것은 아니다.
+
+예를 들어 다음 코드에서 `@ResponseStatus`를 빼면 예외는 처리됐지만 별도의 상태 코드를 지정하지 않았기 때문에 정상 응답 상태인 200으로 끝날 수 있다.
+
+```java
+@ResponseStatus(HttpStatus.BAD_REQUEST)
+@ExceptionHandler(IllegalArgumentException.class)
+public ErrorResult illegalExHandler(IllegalArgumentException e) {
+    return new ErrorResult("BAD", e.getMessage());
+}
+```
+
+따라서 API 오류 응답에서는 두 가지를 같이 봐야 한다.
+
+```text
+1. Body에는 어떤 오류 데이터를 보낼 것인가?
+2. HTTP 상태 코드는 무엇으로 보낼 것인가?
+```
+
+현재 예제에서는 `@ResponseStatus(HttpStatus.BAD_REQUEST)`를 사용해 400을 지정한다.
+
+---
+
+## 29. ResponseEntity를 반환하면 상태 코드와 Body를 한 번에 정할 수 있다
+
+`@ResponseStatus` 대신 `ResponseEntity`를 반환해도 된다.
+
+```java
+@ExceptionHandler(UserException.class)
+public ResponseEntity<ErrorResult> userExHandler(UserException e) {
+    ErrorResult body = new ErrorResult("USER-EX", e.getMessage());
+    return new ResponseEntity<>(body, HttpStatus.BAD_REQUEST);
+}
+```
+
+`ResponseEntity`는 응답의 주요 요소를 하나의 객체로 표현한다.
+
+```text
+ResponseEntity
+├─ Body   : ErrorResult
+├─ Header : 필요한 경우 추가 가능
+└─ Status : 400 Bad Request
+```
+
+`@RestController`가 없더라도 `ResponseEntity` 반환 타입은 Spring MVC가 HTTP 응답으로 직접 처리한다.
+
+다만 `ResponseEntity`가 스스로 JSON 문자열을 만드는 것은 아니다.
+
+```text
+ResponseEntity 반환
+→ Spring MVC가 상태 코드와 헤더를 HttpServletResponse에 반영
+→ Body 객체는 HttpMessageConverter에 전달
+→ Jackson 컨버터가 선택되면 JSON으로 직렬화
+→ 응답 Body에 기록
+```
+
+즉, 개발자가 `HttpServletResponse`에 직접 `write()` 하는 것과 결과는 비슷해 보여도 처리 방식은 다르다. 실제 응답 객체에 값을 기록하는 작업은 Spring MVC가 대신한다.
+
+---
+
+## 30. @ExceptionHandler에는 예외 타입을 생략할 수도 있다
+
+처리할 예외는 애노테이션에 직접 작성할 수도 있다.
+
+```java
+@ExceptionHandler(UserException.class)
+```
+
+또는 메서드 파라미터의 예외 타입을 기준으로 추론하게 둘 수도 있다.
+
+```java
+@ExceptionHandler
+public ResponseEntity<ErrorResult> userExHandler(UserException e) {
+    // ...
+}
+```
+
+현재 예제처럼 파라미터 타입이 명확하다면 둘 다 `UserException`을 처리하는 메서드로 사용할 수 있다.
+
+학습할 때는 다음처럼 이해하면 충분하다.
+
+```text
+@ExceptionHandler에 예외 타입 명시
+→ 그 타입을 기준으로 매칭
+
+예외 타입 생략
+→ 메서드 파라미터의 예외 타입을 기준으로 판단
+```
+
+---
+
+## 31. 부모 예외와 자식 예외가 함께 걸리면 더 구체적인 쪽이 선택된다
+
+예외도 상속 관계가 있기 때문에 부모 예외를 지정하면 그 하위 예외도 처리 대상이 될 수 있다.
+
+예를 들어 다음 두 메서드가 있다고 생각해보자.
+
+```text
+IllegalArgumentException 처리 메서드
+Exception 처리 메서드
+```
+
+`IllegalArgumentException`은 `Exception`의 하위 타입이므로 두 메서드 모두 후보가 될 수 있다.
+
+이 경우에는 실제 발생한 예외와 더 가까운 `IllegalArgumentException` 처리 메서드가 우선된다.
+
+```text
+IllegalArgumentException 발생
+→ IllegalArgumentException용 Handler 후보
+→ Exception용 Handler도 후보
+→ 더 구체적인 IllegalArgumentException Handler 선택
+```
+
+현재 컨트롤러의 마지막 `Exception` 처리 메서드는 앞에서 잡지 못한 예외를 처리하는 공통 안전망처럼 볼 수 있다.
+
+```java
+@ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+@ExceptionHandler
+public ErrorResult exHandler(Exception e) {
+    return new ErrorResult("EX", "내부 오류");
+}
+```
+
+구체적인 예외는 앞의 메서드에서 처리하고, 나머지 예상하지 못한 예외는 여기서 500으로 정리하는 구조다.
+
+---
+
+## 32. @ExceptionHandler는 기본적으로 해당 컨트롤러 안의 예외를 처리한다
+
+컨트롤러 내부에 선언한 `@ExceptionHandler`는 그 컨트롤러에서 발생한 예외를 처리하는 데 적합하다.
+
+이 방식의 장점은 같은 예외 타입이라도 컨트롤러의 역할에 맞춰 다른 응답을 만들기 쉽다는 점이다.
+
+```text
+회원 컨트롤러의 RuntimeException
+→ 회원 API 규격에 맞는 오류 응답
+
+주문 컨트롤러의 RuntimeException
+→ 주문 API 규격에 맞는 오류 응답
+```
+
+직접 만든 전역 `HandlerExceptionResolver` 하나에서 모든 URI와 예외를 구분하는 것보다 책임을 나누기 편하다.
+
+반대로 여러 컨트롤러에서 같은 예외 처리 코드를 반복하게 되면 중복이 생길 수 있다. 이런 공통 처리 문제는 이후 `@ControllerAdvice` 또는 `@RestControllerAdvice`로 분리할 수 있다.
+
+---
+
+## 33. 지금까지의 API 예외 처리 방식을 비교하면 차이가 명확하다
+
+지금까지 사용한 방법을 한 번에 비교하면 다음과 같다.
+
+```text
+BasicErrorController
+→ Spring Boot가 제공하는 공통 오류 응답 사용
+→ 간단하지만 API별 세부 규격을 만들기에는 제한이 있음
+
+직접 HandlerExceptionResolver 구현
+→ 예외 처리 과정을 원하는 대로 제어 가능
+→ HttpServletResponse, JSON 변환 등을 직접 다뤄야 해서 코드가 많아짐
+
+@ExceptionHandler
+→ 컨트롤러 메서드를 작성하듯 예외 처리 가능
+→ 객체 반환과 메시지 컨버터를 그대로 활용할 수 있음
+→ API별 오류 Body와 상태 코드를 만들기 편함
+```
+
+결국 API 예외 처리에서는 단순히 "예외를 없애는 것"보다 **예외를 클라이언트가 이해할 수 있는 HTTP 상태 코드와 오류 데이터로 바꾸는 것**이 핵심이다.
+
+
+
+
+
 
 
 
