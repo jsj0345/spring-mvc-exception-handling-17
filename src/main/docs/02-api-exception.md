@@ -906,7 +906,40 @@ BasicErrorController
 
 결국 API 예외 처리에서는 단순히 "예외를 없애는 것"보다 **예외를 클라이언트가 이해할 수 있는 HTTP 상태 코드와 오류 데이터로 바꾸는 것**이 핵심이다.
 
+### 34. 공통 예외 처리를 따로 관리하기
 
+컨트롤러 안에서 `@ExceptionHandler`를 직접 사용할 수도 있지만, 이런 코드가 많아지면 요청을 처리하는 부분과 오류 상황을 처리하는 부분을 한눈에 구분하기 어려워진다.
+
+`@ControllerAdvice` 계열을 사용하면 여러 컨트롤러에서 반복해서 사용할 예외 처리 규칙을 별도의 위치에서 관리할 수 있다.
+
+결과적으로 컨트롤러에는 정상적인 요청 흐름을 중심으로 남기고, 공통 오류 처리는 Advice 쪽에 맡기는 구조를 만들 수 있다.
+
+---
+
+### 35. `@ControllerAdvice`와 `@RestControllerAdvice`
+
+`@ControllerAdvice`는 여러 컨트롤러에서 함께 사용할 부가 처리 기능을 정의할 때 사용한다.  
+대표적으로 `@ExceptionHandler`, `@InitBinder` 등을 공통으로 적용할 수 있다.
+
+범위를 따로 설정하지 않았다면 해당 Advice는 전반적인 컨트롤러 처리에 참여한다.
+
+`@RestControllerAdvice`는 여기에 응답 값을 HTTP Body로 보내는 동작까지 포함한다. 따라서 JSON 형태의 오류 응답을 만드는 API에서는 `@RestControllerAdvice`를 사용하기 편하다.
+
+@RestControllerAdvice는 @ControllerAdvice에 응답 값을 HTTP Body로 처리하는 기능이 
+포함된 형태라고 이해하면 된다.
+---
+
+### 36. Advice를 적용할 대상을 고를 수도 있다
+
+모든 컨트롤러가 하나의 예외 처리 정책을 공유해야 하는 것은 아니다.
+
+예를 들어 REST 컨트롤러에만 해당 Advice를 사용하고 싶다면 다음처럼 범위를 지정할 수 있다.
+
+```java
+@ControllerAdvice(annotations = RestController.class)
+```
+
+이렇게 하면 Advice가 동작할 컨트롤러의 범위를 필요한 영역으로 좁힐 수 있다. 
 
 
 
